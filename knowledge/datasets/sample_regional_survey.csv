@@ -1,0 +1,7 @@
+region,land_use,soil_organic_carbon_pct,avg_annual_rainfall_mm,pollinator_species_count
+semi-arid,monoculture,0.3,350,8
+semi-arid,agroforestry,0.9,350,22
+temperate,monoculture,1.1,800,15
+temperate,polyculture,1.6,800,31
+tropical,monoculture,0.8,1800,20
+tropical,agroforestry,2.2,1800,47

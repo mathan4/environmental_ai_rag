@@ -1,0 +1,19 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+venv/
+env/
+.venv/
+
+# Generated knowledge base artifacts (rebuild with build_knowledge_base.py)
+knowledge/index/
+db/eco_knowledge.sqlite3
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/
