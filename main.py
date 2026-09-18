@@ -6,6 +6,8 @@ Usage:
 """
 import sys
 import json
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 from core.engine import handle_message
 from core.formatting import render_result_text
 

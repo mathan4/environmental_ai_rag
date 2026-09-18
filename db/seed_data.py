@@ -127,30 +127,31 @@ def seed():
     init_schema()
     conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM interventions")
-        cur.execute("DELETE FROM metric_thresholds")
-        for i in INTERVENTIONS:
-            cur.execute(
-                """
-                INSERT INTO interventions
-                (name, action_summary, mechanism, impacted_metric, effect_low_pct, effect_high_pct,
-                 time_horizon, time_horizon_detail, confidence, source_org, targets_issues)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (i["name"], i["action_summary"], i["mechanism"], i["impacted_metric"],
-                 i["effect_low_pct"], i["effect_high_pct"], i["time_horizon"], i["time_horizon_detail"],
-                 i["confidence"], i["source_org"], ",".join(i["targets_issues"])),
-            )
-        for m in METRIC_THRESHOLDS:
-            cur.execute(
-                "INSERT INTO metric_thresholds (metric, low_bound, high_bound, unit, notes) VALUES (?, ?, ?, ?, ?)",
-                m,
-            )
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE interventions RESTART IDENTITY")
+            cur.execute("TRUNCATE TABLE metric_thresholds")
+            for i in INTERVENTIONS:
+                cur.execute(
+                    """
+                    INSERT INTO interventions
+                    (name, action_summary, mechanism, impacted_metric, effect_low_pct, effect_high_pct,
+                     time_horizon, time_horizon_detail, confidence, source_org, targets_issues)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (i["name"], i["action_summary"], i["mechanism"], i["impacted_metric"],
+                     i["effect_low_pct"], i["effect_high_pct"], i["time_horizon"], i["time_horizon_detail"],
+                     i["confidence"], i["source_org"], ",".join(i["targets_issues"])),
+                )
+            for m in METRIC_THRESHOLDS:
+                cur.execute(
+                    "INSERT INTO metric_thresholds (metric, low_bound, high_bound, unit, notes) VALUES (%s, %s, %s, %s, %s)",
+                    m,
+                )
         conn.commit()
         print(f"Seeded {len(INTERVENTIONS)} interventions and {len(METRIC_THRESHOLDS)} thresholds.")
     finally:
         conn.close()
+
 
 
 if __name__ == "__main__":

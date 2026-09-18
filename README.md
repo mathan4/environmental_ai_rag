@@ -9,14 +9,14 @@ doesn't have enough information — rather than a plain LLM chatbot guessing.
 
 Three separable layers, each doing a distinct job:
 
-1. **Structured knowledge (SQLite `db/eco_knowledge.sqlite3`)** — quantified
+1. **Structured knowledge (PostgreSQL `interventions` table)** — quantified
    intervention benchmarks: effect ranges (%), time horizons, confidence, and
    sources. The LLM is instructed to use only these numbers, never invent its own.
    Interventions are matched to a query by **issue tags** (`targets_issues` column),
    not hardcoded field names — see "Soil health is multi-factor" below.
-2. **Semantic knowledge (FAISS `knowledge/index/`)** — scientific-reasoning
+2. **Semantic knowledge (PostgreSQL `pgvector` in `rag_documents` table)** — scientific-reasoning
    passages (why things work, how variables interact), chunked and embedded from
-   `knowledge/documents/*.md`, retrieved by similarity to the detected issues.
+   `knowledge/documents/*.md`, retrieved by vector similarity (`<=>`) to the detected issues.
 3. **Multi-metric reasoning (`reasoning/multi_metric_engine.py`)** — plain Python
    rules that decide which cross-variable issues are actually present (e.g. low SOC
    *and* low rainfall compound each other) *before* anything is retrieved or sent to
@@ -33,19 +33,19 @@ recall facts from its own training — it's constrained to the evidence handed t
 User text / JSON  ──►  input_parser.py  ──►  Session memory (multi-turn)
                                                    │
                                     missing required fields?
-                                          │              │
-                                        yes              no
-                                          │              │
-                                 ask clarifying    multi_metric_engine.py
-                                   question         (finds linked issues)
-                                                          │
-                                          ┌───────────────┴───────────────┐
-                                          ▼                               ▼
-                              SQLite structured lookup           FAISS semantic search
-                              (interventions, filtered           (knowledge/documents/,
-                               by land_use/rainfall/SOC)          chunked + embedded)
-                                          │                               │
-                                          └───────────────┬───────────────┘
+                                           │              │
+                                         yes              no
+                                           │              │
+                                  ask clarifying    multi_metric_engine.py
+                                    question         (finds linked issues)
+                                                           │
+                                           ┌───────────────┴───────────────┐
+                                           ▼                               ▼
+                              PostgreSQL structured lookup      PostgreSQL pgvector search
+                              (interventions, filtered           (rag_documents table,
+                               by issue tags)                    cosine similarity)
+                                           │                               │
+                                           └───────────────┬───────────────┘
                                                            ▼
                                               Groq synthesis (constrained
                                               to given evidence + sources)
@@ -62,9 +62,9 @@ User text / JSON  ──►  input_parser.py  ──►  Session memory (multi-t
 python -m venv venv && source venv/bin/activate   # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 
-cp .env.example .env      # fill in GROQ_API_KEY
+cp .env.example .env      # fill in GROQ_API_KEY and PostgreSQL connection credentials
 
-python build_knowledge_base.py   # builds the FAISS index + seeds SQLite (run once)
+python build_knowledge_base.py   # initializes PostgreSQL schema, seeds benchmarks, and builds pgvector index
 ```
 
 ## Running it

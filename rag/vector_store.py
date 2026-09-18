@@ -1,22 +1,11 @@
 """
-FAISS-backed vector store for the knowledge documents.
-
-Chosen over a full DB-hosted vector extension deliberately: this system needs no
-server to run at all — index + chunk text are saved to disk as plain files and
-loaded back in on startup. Simpler to hand off / deploy than a Postgres+pgvector setup.
+PostgreSQL + pgvector backed vector store for knowledge documents.
 """
-import os
-import pickle
-import numpy as np
-import faiss
-
-INDEX_DIR = os.path.join(os.path.dirname(__file__), "..", "knowledge", "index")
-INDEX_PATH = os.path.join(INDEX_DIR, "faiss.index")
-CHUNKS_PATH = os.path.join(INDEX_DIR, "chunks.pkl")
+from db.connection import get_connection, init_schema
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
-    """Simple sliding-window chunking by characters (good enough for these doc sizes)."""
+    """Simple sliding-window chunking by characters."""
     chunks = []
     start = 0
     while start < len(text):
@@ -30,12 +19,12 @@ def build_index(entries: list[dict]) -> None:
     """
     entries: list of {"source": str, "page": int|None, "text": str} — one entry per
     raw document (markdown file) or page (PDF page). Each entry is chunked, and every
-    resulting chunk keeps its source/page so retrieved evidence can be cited precisely
-    (e.g. "IPCC_AR6_WG2.pdf, p.14" for a PDF, vs just a filename for hand-written docs).
+    resulting chunk keeps its source/page so retrieved evidence can be cited precisely.
     """
-    from rag.embeddings import embed_batch  # local import to avoid loading the model unless building
+    from rag.embeddings import embed_batch  # local import to avoid loading model unless building
 
-    os.makedirs(INDEX_DIR, exist_ok=True)
+    init_schema()
+
     all_chunks = []
     metadata = []
     for entry in entries:
@@ -43,41 +32,58 @@ def build_index(entries: list[dict]) -> None:
             all_chunks.append(piece)
             metadata.append({"source": entry["source"], "page": entry.get("page"), "text": piece})
 
-    vectors = np.array(embed_batch(all_chunks)).astype("float32")
-    dim = vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)  # inner product == cosine similarity since vectors are normalized
-    index.add(vectors)
+    if not all_chunks:
+        print("No documents or chunks found to index.")
+        return
 
-    faiss.write_index(index, INDEX_PATH)
-    with open(CHUNKS_PATH, "wb") as f:
-        pickle.dump(metadata, f)
+    vectors = embed_batch(all_chunks)
 
-    sources = {e["source"] for e in entries}
-    print(f"Indexed {len(all_chunks)} chunks from {len(sources)} source documents.")
-
-
-_index = None
-_metadata = None
-
-
-def _load():
-    global _index, _metadata
-    if _index is None:
-        if not os.path.exists(INDEX_PATH):
-            raise RuntimeError("No FAISS index found. Run build_knowledge_base.py first.")
-        _index = faiss.read_index(INDEX_PATH)
-        with open(CHUNKS_PATH, "rb") as f:
-            _metadata = pickle.load(f)
-    return _index, _metadata
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE rag_documents RESTART IDENTITY")
+            for meta, vec in zip(metadata, vectors):
+                cur.execute(
+                    """
+                    INSERT INTO rag_documents (source, page, text, embedding)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (meta["source"], meta["page"], meta["text"], vec.tolist()),
+                )
+        conn.commit()
+        sources = {e["source"] for e in entries}
+        print(f"Indexed {len(all_chunks)} chunks from {len(sources)} source documents into PostgreSQL pgvector.")
+    finally:
+        conn.close()
 
 
 def search(query_vector, top_k: int = 4) -> list[dict]:
-    index, metadata = _load()
-    q = np.array([query_vector]).astype("float32")
-    scores, indices = index.search(q, top_k)
-    results = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx == -1:
-            continue
-        results.append({**metadata[idx], "score": float(score)})
-    return results
+    """
+    Performs cosine similarity vector search against PostgreSQL rag_documents table.
+    """
+    conn = get_connection()
+    try:
+        q_vec = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source, page, text, 1 - (embedding <=> %s::vector) AS score
+                FROM rag_documents
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (q_vec, q_vec, top_k),
+            )
+            rows = cur.fetchall()
+            results = []
+            for r in rows:
+                results.append({
+                    "source": r["source"],
+                    "page": r["page"],
+                    "text": r["text"],
+                    "score": float(r["score"]),
+                })
+            return results
+    finally:
+        conn.close()
+
