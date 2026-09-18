@@ -70,6 +70,10 @@ python build_knowledge_base.py   # initializes PostgreSQL schema, seeds benchmar
 ## Running it
 
 ```bash
+# Launch Streamlit Web UI (Interactive Web Application)
+streamlit run app.py
+
+# CLI Commands:
 python main.py example      # runs the exact example from the spec (SOC 0.3%, low rainfall,
                              # monoculture wheat, semi-arid)
 
