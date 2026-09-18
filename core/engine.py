@@ -1,12 +1,17 @@
 """
 End-to-end orchestration:
 1. Extract/merge structured fields from the user's text (or accept structured JSON directly)
-2. Check for missing required fields -> if any, ask a clarifying question (no guessing)
-3. Run multi-metric reasoning to find linked cross-variable issues
-4. Retrieve structured interventions + semantic passages based on those issues
-5. Synthesize the final evidence-backed response via Groq (numbers/sources constrained
-   to what was retrieved)
-6. Update conversation memory
+2. Run multi-metric reasoning on whatever inputs are known so far (works fine even
+   with partial/no data -- analyze() is null-safe)
+3. Retrieve structured interventions + semantic passages based on whatever was detected
+4. Synthesize the response via Groq -- the LLM itself decides, per turn, whether this
+   is a general question it can answer directly (`reply`), a site-specific analysis
+   request that's missing required data (`clarifying_question`), or a request for a
+   fresh recommendation set (`recommendations`). Required-field completeness is passed
+   as INFORMATION, not used as a hard Python-level gate -- a general conceptual question
+   ("should I use GM seeds?", "what is agroforestry?") should get answered on its own
+   terms, not blocked until soil/rainfall/land-use are all on file.
+5. Update conversation memory
 """
 from conversation.memory import get_session
 from conversation.input_parser import extract_fields
@@ -31,39 +36,35 @@ def handle_message(user_text: str, session_id: str = "default", structured_input
     inputs = session.snapshot()
     missing = missing_required_fields(inputs)
 
-    if missing:
-        session.pending_fields = missing
-        result = synthesize_response(
-            user_query=user_text, inputs=inputs, analysis={"issues": [], "linked_variables": []},
-            structured_evidence=[], semantic_evidence=[], missing_fields=missing,
-            conversation_history=session.history,
-        )
-        session.add_turn("assistant", result.get("clarifying_question", ""))
-        return result
-
-    session.pending_fields = []
-
+    # analyze() is null-safe (checks `x is not None` before every threshold comparison),
+    # so this works fine with zero, partial, or complete inputs -- no separate code path
+    # needed for "not enough data yet".
     analysis = analyze(inputs)
 
-    structured_evidence = get_structured_interventions(
-        land_use=inputs.get("land_use"),
-        rainfall=inputs.get("rainfall_level"),
-        soc=inputs.get("soil_organic_carbon_pct"),
-    )
+    detected_issue_tags = [i["issue"] for i in analysis["issues"]]
+    structured_evidence = get_structured_interventions(detected_issue_tags) if detected_issue_tags else []
 
-    # Build a semantic query from the detected issues so retrieval is targeted, not generic.
-    issue_terms = " ".join(i["issue"].replace("_", " ") for i in analysis["issues"]) or user_text
-    semantic_evidence = semantic_search(f"{user_text} {issue_terms}", top_k=4)
+    # Query the knowledge base with whatever we have -- the user's own message always
+    # contributes, issue terms add specificity once any data is known.
+    issue_terms = " ".join(i["issue"].replace("_", " ") for i in analysis["issues"])
+    semantic_query = f"{user_text} {issue_terms}".strip()
+    semantic_evidence = semantic_search(semantic_query, top_k=4)
 
     result = synthesize_response(
         user_query=user_text, inputs=inputs, analysis=analysis,
         structured_evidence=structured_evidence, semantic_evidence=semantic_evidence,
-        missing_fields=[], conversation_history=session.history,
+        missing_fields=missing, conversation_history=session.history,
     )
+
+    # pending_fields only matters for the bare-answer context fallback (see
+    # conversation/input_parser.py) -- set it when the model actually asked a
+    # clarifying question this turn, clear it otherwise.
+    session.pending_fields = missing if result.get("clarifying_question") else []
 
     session.add_turn("assistant", render_result_text(result))
     result["_debug"] = {
         "inputs_used": inputs,
+        "missing_required_fields": missing,
         "issues_detected": analysis["issues"],
         "structured_matches": len(structured_evidence),
         "semantic_matches": len(semantic_evidence),

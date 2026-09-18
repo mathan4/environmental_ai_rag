@@ -13,6 +13,10 @@ def render_result_text(result: dict) -> str:
     if result.get("clarifying_question"):
         return f"[Asked clarifying question]: {result['clarifying_question']}"
 
+    if result.get("reply"):
+        # Conversational prose mode — a direct answer, not a recommendation card set.
+        return result["reply"]
+
     lines = []
     for i, rec in enumerate(result.get("recommendations", []), 1):
         lines.append(f"[{i}] {rec.get('action')}")

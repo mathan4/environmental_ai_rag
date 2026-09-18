@@ -165,10 +165,18 @@ def extract_fields(text: str, pending_fields: list[str] = None) -> dict:
     if soc_match:
         fields["soil_organic_carbon_pct"] = float(soc_match.group(1))
 
-    # Soil pH
-    ph_match = re.search(r"ph[^\d]{0,10}(\d+\.?\d*)", text, re.IGNORECASE)
+    # Soil pH -- word-boundary + "soil" or standalone "pH", to avoid false-matching
+    # inside unrelated words that happen to contain "ph" (e.g. "phosphorus").
+    ph_match = re.search(r"\b(?:soil\s+)?ph\b[^\d]{0,10}(\d+\.?\d*)", text, re.IGNORECASE)
     if ph_match:
         fields["soil_ph"] = float(ph_match.group(1))
+
+    # Soil moisture: "soil moisture of 25%", "moisture content 20%", "25% moisture"
+    moisture_match = re.search(r"(?:soil\s+moisture|moisture\s+content|moisture)[^\d]{0,15}(\d+\.?\d*)\s*%?", text, re.IGNORECASE)
+    if not moisture_match:
+        moisture_match = re.search(r"(\d+\.?\d*)\s*%\s*(?:soil\s+)?moisture", text, re.IGNORECASE)
+    if moisture_match:
+        fields["soil_moisture_pct"] = float(moisture_match.group(1))
 
     land_use = _match_keywords(text, LAND_USE_KEYWORDS)
     if not land_use:
@@ -211,6 +219,11 @@ def extract_fields(text: str, pending_fields: list[str] = None) -> dict:
             bare_number = re.fullmatch(r"(\d+\.?\d*)\s*%?", stripped)
             if bare_number:
                 fields["soil_organic_carbon_pct"] = float(bare_number.group(1))
+        # Note: soil_ph and soil_moisture_pct are OPTIONAL fields (see
+        # reasoning/multi_metric_engine.py's OPTIONAL_FIELDS), so they're never in
+        # pending_fields today -- this bare-number fallback only fires for REQUIRED
+        # fields the system explicitly blocked on. If you later promote pH/moisture
+        # to required, add matching blocks here following the SOC pattern above.
 
         if "land_use" in pending_fields and "land_use" not in fields:
             # Bare single-word land-use answers ("farm", "grazing land") that don't

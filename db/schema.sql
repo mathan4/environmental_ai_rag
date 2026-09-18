@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS interventions (
     time_horizon_detail TEXT,                -- e.g. '2-3 years'
     confidence          TEXT NOT NULL,       -- 'high' | 'medium' | 'low'
     source_org          TEXT NOT NULL,       -- e.g. 'FAO', 'IPCC', 'CBD/IPBES'
-    applicable_land_use TEXT,                -- e.g. 'monoculture', 'any'
-    applicable_rainfall TEXT,                -- e.g. 'low', 'any'
-    applicable_soc_max  REAL                 -- only recommend if current SOC% is below this
+    -- Comma-separated issue tags this intervention responds to, matching the
+    -- `issue` keys produced by reasoning/multi_metric_engine.py (e.g.
+    -- 'low_soil_organic_carbon,low_rainfall_stress'). Generic replacement for the
+    -- old applicable_land_use/applicable_rainfall/applicable_soc_max columns --
+    -- adding a new soil (or any) metric no longer needs a schema change, just a
+    -- new issue tag on both the reasoning-engine side and here.
+    targets_issues      TEXT NOT NULL
 );
 
 -- Registry of ingested structured datasets (CSV). Actual data lives in its own

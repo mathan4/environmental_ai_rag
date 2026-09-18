@@ -14,6 +14,11 @@ def print_result(result: dict):
     if result.get("clarifying_question"):
         print(f"\nSystem: {result['clarifying_question']}\n")
         return
+    if result.get("reply"):
+        # Conversational prose -- print plainly, like a normal chat reply, not
+        # boxed as if it were a structured recommendation report.
+        print(f"\nSystem: {result['reply']}\n")
+        return
     print("\n" + "=" * 60)
     print(render_result_text(result))
     print("=" * 60)

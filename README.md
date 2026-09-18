@@ -12,6 +12,8 @@ Three separable layers, each doing a distinct job:
 1. **Structured knowledge (SQLite `db/eco_knowledge.sqlite3`)** — quantified
    intervention benchmarks: effect ranges (%), time horizons, confidence, and
    sources. The LLM is instructed to use only these numbers, never invent its own.
+   Interventions are matched to a query by **issue tags** (`targets_issues` column),
+   not hardcoded field names — see "Soil health is multi-factor" below.
 2. **Semantic knowledge (FAISS `knowledge/index/`)** — scientific-reasoning
    passages (why things work, how variables interact), chunked and embedded from
    `knowledge/documents/*.md`, retrieved by similarity to the detected issues.
@@ -89,6 +91,21 @@ message's context and proceed:
 You: soil organic carbon is 0.3%, rainfall is low, we grow monoculture wheat
 ```
 
+## Soil health is multi-factor, not just organic carbon
+
+Soil health inputs are `soil_organic_carbon_pct`, `soil_ph`, and `soil_moisture_pct`
+(all optional except SOC, which is required). Each has its own threshold row in
+`metric_thresholds` (`db/seed_data.py`'s `METRIC_THRESHOLDS`) — the reasoning engine
+reads bounds from there rather than hardcoding them, so adding a fourth soil metric
+means adding a threshold row and an `analyze()` check, not touching the intervention
+matching logic at all.
+
+Interventions declare which issue tags they respond to (`targets_issues`, comma-
+separated), matching the `issue` keys `reasoning/multi_metric_engine.py`'s `analyze()`
+produces (`low_soil_organic_carbon`, `soil_ph_imbalance`, `low_soil_moisture`, etc.).
+`rag/retriever.py`'s `get_structured_interventions()` just intersects detected tags
+against the table — no per-metric filter columns to maintain.
+
 ## Extending the knowledge base
 
 - **Add real research papers/reports**: drop PDFs into `knowledge/papers/`, then
@@ -108,7 +125,9 @@ You: soil organic carbon is 0.3%, rainfall is low, we grow monoculture wheat
   citable benchmarks) — CSVs are raw reference data you can inspect and later
   promote specific findings into `db/seed_data.py` once you've validated them.
 - **Add more curated structured benchmarks**: edit `db/seed_data.py`'s
-  `INTERVENTIONS` list, then re-run `python build_knowledge_base.py`.
+  `INTERVENTIONS` list — give each entry a `targets_issues` list matching issue tags
+  from `reasoning/multi_metric_engine.py`'s `analyze()` (add a new tag there too if
+  it's a genuinely new issue) — then re-run `python build_knowledge_base.py`.
 - Add geo-coordinates: the `region_type` field currently accepts a text label
   (semi-arid, tropical, etc.); wiring this to real geo-coordinates would mean adding
   a climate-zone lookup (e.g. via a koppen-climate API) that maps lat/lon to a

@@ -2,7 +2,8 @@
 The retrieval layer combines two knowledge sources on purpose:
 
 1. STRUCTURED lookup (SQLite interventions table) — filtered by the reasoning
-   engine's detected issues (land use, rainfall, SOC level). This is where numeric
+   engine's detected issue tags (any soil/climate/land-use/human-impact issue the
+   engine can name — not hardcoded to any one metric). This is where numeric
    claims (% ranges, time horizons, sources) come from.
 2. SEMANTIC search (FAISS over knowledge documents) — provides the scientific
    reasoning/mechanism narrative that supports and contextualizes those numbers.
@@ -14,8 +15,17 @@ from rag.embeddings import embed_text
 from rag.vector_store import search as vector_search
 
 
-def get_structured_interventions(land_use: str = None, rainfall: str = None, soc: float = None) -> list[dict]:
-    """Filters the structured benchmark table by applicability to the current inputs."""
+def get_structured_interventions(detected_issues: list[str]) -> list[dict]:
+    """
+    Returns interventions whose targets_issues overlaps with the issue tags the
+    reasoning engine actually detected for this input (see
+    reasoning/multi_metric_engine.py's analyze()). Matching is by issue tag, not by
+    hardcoded field names -- adding a new metric (soil pH, moisture, or anything
+    else) only requires a new issue tag on both sides, no filter logic changes here.
+    """
+    if not detected_issues:
+        return []
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -24,19 +34,19 @@ def get_structured_interventions(land_use: str = None, rainfall: str = None, soc
     finally:
         conn.close()
 
+    detected_set = set(detected_issues)
     filtered = []
     for r in rows:
-        if r["applicable_land_use"] not in (None, "any") and land_use and r["applicable_land_use"] != land_use:
-            continue
-        if r["applicable_rainfall"] not in (None, "any") and rainfall and r["applicable_rainfall"] != rainfall:
-            continue
-        if r["applicable_soc_max"] is not None and soc is not None and soc > r["applicable_soc_max"]:
-            continue
-        filtered.append(r)
+        row_tags = set(r["targets_issues"].split(","))
+        if row_tags & detected_set:
+            filtered.append(r)
     return filtered
 
 
 def get_metric_thresholds() -> dict:
+    """Reference thresholds (low/high bounds) for interpreting raw metric values --
+    used by the reasoning engine so bounds live in one data-driven place instead of
+    being hardcoded per metric in Python."""
     conn = get_connection()
     try:
         cur = conn.cursor()

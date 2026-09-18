@@ -3,6 +3,13 @@ Groq wrapper for the final synthesis step. Deliberately constrained: the model i
 given the structured interventions + semantic passages + linked issues as its ONLY
 source of numbers and citations, and instructed not to introduce new ones. This is
 what keeps output evidence-backed rather than plausible-sounding LLM invention.
+
+One unified prompt handles all three response modes (clarifying_question / reply /
+recommendations) -- missing_fields is passed as CONTEXT the model reasons about, not
+a hard trigger for a separate restricted prompt. A general question ("should I use GM
+seeds?") should get answered on its own terms even if site data is incomplete; only a
+request for a genuinely site-specific, data-grounded analysis should be blocked on
+missing fields.
 """
 import os
 import json
@@ -15,6 +22,7 @@ _client = None
 
 OUTPUT_SCHEMA_EXAMPLE = {
     "clarifying_question": None,
+    "reply": None,
     "recommendations": [
         {
             "action": "What to do, specific and non-generic",
@@ -46,78 +54,96 @@ def synthesize_response(user_query: str, inputs: dict, analysis: dict,
                          missing_fields: list[str], conversation_history: list[dict]) -> dict:
     model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
-    if missing_fields:
-        # Not enough info to reason responsibly — ask, don't guess.
-        system_prompt = (
-            "You are an environmental scientist assistant. The user has not yet provided "
-            "enough information to give a grounded recommendation. Ask ONE concise "
-            "clarifying question requesting the missing fields, in plain language "
-            "(don't expose internal field names verbatim). "
-            "Respond with ONLY a JSON object: {\"clarifying_question\": \"...\", "
-            "\"recommendations\": [], \"variable_links\": []}"
-        )
-        user_prompt = f"User said: {user_query}\nMissing fields (internal names): {missing_fields}"
-    else:
-        # Increased from a 6-turn window: rendered turns are now short, clean text
-        # (see core/formatting.py) rather than raw Python list reprs, so a larger
-        # window costs little and gives the model more real conversational grounding.
-        history_block = "\n\n".join(
-            f"{t['role'].upper()}: {t['content']}" for t in conversation_history[-10:]
-        ) or "No prior turns — this is the first exchange."
+    # Increased from a 6-turn window: rendered turns are now short, clean text
+    # (see core/formatting.py) rather than raw Python list reprs, so a larger
+    # window costs little and gives the model more real conversational grounding.
+    history_block = "\n\n".join(
+        f"{t['role'].upper()}: {t['content']}" for t in conversation_history[-10:]
+    ) or "No prior turns -- this is the first exchange."
 
-        structured_block = json.dumps(structured_evidence, indent=2) if structured_evidence else "None matched."
-        semantic_block = "\n\n".join(
-            f"[{s['source']}{', p.' + str(s['page']) if s.get('page') else ''}]: {s['text']}"
-            for s in semantic_evidence
-        ) or "None retrieved."
-        issues_block = "\n".join(f"- {i['issue']}: {i['detail']}" for i in analysis["issues"]) or "None detected."
-        links_block = "\n".join(f"- {l}" for l in analysis["linked_variables"]) or "None."
+    structured_block = json.dumps(structured_evidence, indent=2) if structured_evidence else "None matched."
+    semantic_block = "\n\n".join(
+        f"[{s['source']}{', p.' + str(s['page']) if s.get('page') else ''}]: {s['text']}"
+        for s in semantic_evidence
+    ) or "None retrieved."
+    issues_block = "\n".join(f"- {i['issue']}: {i['detail']}" for i in analysis["issues"]) or "None detected yet."
+    links_block = "\n".join(f"- {l}" for l in analysis["linked_variables"]) or "None yet."
+    missing_block = ", ".join(missing_fields) if missing_fields else "None -- all required site data is known."
 
-        system_prompt = (
-            "You are an environmental scientist assistant producing evidence-backed "
-            "biodiversity recommendations, in an ONGOING multi-turn conversation with a "
-            "real user. You are given: the full conversation history so far, detected "
-            "cross-variable issues, structured intervention data (with real effect "
-            "ranges, time horizons, and sources — use these numbers and sources, do not "
-            "invent your own), and supporting scientific-reasoning passages.\n\n"
-            "How to use the conversation history (read it before answering):\n"
-            "- If the current user message provides NEW environmental data (a number, a "
-            "land-use type, a rainfall level, etc.), treat this as an update and generate "
-            "fresh recommendations grounded in the full updated picture.\n"
-            "- If the current user message is FEEDBACK or a REFINEMENT REQUEST on what "
-            "you already said (e.g. 'bad', 'be more specific', 'be conversational', "
-            "'what crops exactly') rather than new data, do NOT just restate your previous "
-            "recommendations in different words. Look at what you already told the user "
-            "(the ASSISTANT turns in the history) and give something that is genuinely "
-            "more useful given that specific feedback — more concrete, more specific, "
-            "less repetitive, or in a different tone as asked — while staying grounded "
-            "in the same evidence.\n"
-            "- Never contradict or silently drop a recommendation you already gave unless "
-            "the user's new input changes the underlying data.\n\n"
-            "Other rules:\n"
-            "- Every recommendation must combine at least 2 of the detected issues/linked "
-            "variables in its reasoning, not just one.\n"
-            "- Use ONLY the numeric ranges and sources given in the structured data. If no "
-            "structured data matches, omit estimated_effect/source rather than inventing them.\n"
-            "- Recommendations must be specific and non-obvious (never say things like "
-            "'use sustainable practices').\n"
-            "- Respond with ONLY a JSON object matching exactly this shape:\n"
-            f"{json.dumps(OUTPUT_SCHEMA_EXAMPLE, indent=2)}"
-        )
-        user_prompt = f"""Conversation so far (read this — the current message may be feedback on it, not new data):
+    system_prompt = (
+        "You are an environmental scientist assistant producing evidence-backed "
+        "biodiversity guidance, in an ONGOING multi-turn conversation with a real user. "
+        "You are given: the full conversation history so far, which required site-data "
+        "fields are still unknown (if any), detected cross-variable issues (from "
+        "whatever site data IS known), structured intervention data (with real effect "
+        "ranges, time horizons, and sources -- use these numbers and sources, do not "
+        "invent your own), and supporting scientific-reasoning passages.\n\n"
+        "RESPONSE MODE -- choose exactly ONE per turn. This is the most important "
+        "decision you make each turn:\n"
+        "- `clarifying_question` -- ONLY when the user is asking for a personalized, "
+        "site-specific analysis or recommendation set (e.g. 'what should I do about my "
+        "land', 'analyze my biodiversity', or providing partial site data clearly "
+        "building toward that) AND required site data is still missing. Ask for "
+        "exactly what's missing, in plain language.\n"
+        "- `reply` (plain conversational prose, 2-5 sentences, `recommendations` left "
+        "empty) -- for a general or conceptual question that can be reasonably "
+        "answered with scientific evidence WITHOUT needing the user's specific site "
+        "data (e.g. 'should I use GM seeds?', 'what is agroforestry?', 'why does soil "
+        "pH matter?'), a request to explain/expand on something already said, or "
+        "ordinary conversational back-and-forth. Answer the actual question directly "
+        "and helpfully first. If site data is missing AND would meaningfully sharpen "
+        "the answer, you may add one short sentence inviting them to share it -- but "
+        "that invitation is secondary to actually answering what they asked. Write "
+        "`reply` the way a knowledgeable person would actually talk -- natural "
+        "sentences, not a labeled template.\n"
+        "- `recommendations` (structured cards, `reply` and `clarifying_question` left "
+        "null/empty) -- when the user wants a fresh site-specific action list AND "
+        "required fields are known (missing fields list is empty), or asks for "
+        "more/different/specific recommendations building on data already given.\n"
+        "- When in doubt between `reply` and `clarifying_question`: if the question "
+        "would still have a genuinely useful general answer without the missing data, "
+        "use `reply`. Only use `clarifying_question` when answering responsibly truly "
+        "requires the missing site data and no reasonable general answer exists.\n\n"
+        "How to use the conversation history (read it before answering):\n"
+        "- If the current user message provides NEW environmental data (a number, a "
+        "land-use type, a rainfall level, etc.), treat this as an update and generate "
+        "fresh recommendations grounded in the full updated picture.\n"
+        "- If the current user message is FEEDBACK or a REFINEMENT REQUEST on what "
+        "you already said (e.g. 'bad', 'be more specific', 'be conversational', "
+        "'what crops exactly') rather than new data, do NOT just restate your previous "
+        "recommendations in different words. Look at what you already told the user "
+        "(the ASSISTANT turns in the history) and give something that is genuinely "
+        "more useful given that specific feedback -- more concrete, more specific, "
+        "less repetitive, or in a different tone as asked -- while staying grounded "
+        "in the same evidence.\n"
+        "- Never contradict or silently drop a recommendation you already gave unless "
+        "the user's new input changes the underlying data.\n\n"
+        "Other rules (apply whenever recommendations are produced):\n"
+        "- Every recommendation must combine at least 2 of the detected issues/linked "
+        "variables in its reasoning, not just one.\n"
+        "- Use ONLY the numeric ranges and sources given in the structured data. If no "
+        "structured data matches, omit estimated_effect/source rather than inventing them.\n"
+        "- Recommendations must be specific and non-obvious (never say things like "
+        "'use sustainable practices').\n"
+        "- Respond with ONLY a JSON object matching exactly this shape:\n"
+        f"{json.dumps(OUTPUT_SCHEMA_EXAMPLE, indent=2)}"
+    )
+    user_prompt = f"""Conversation so far (read this -- the current message may be a general question, feedback, or new site data):
 {history_block}
 
 Current user message: {user_query}
 
-Current known inputs (accumulated across the whole conversation): {json.dumps(inputs)}
+Current known site inputs (accumulated across the whole conversation, may be partial or empty): {json.dumps(inputs)}
 
-Detected cross-variable issues:
+Required site-data fields still missing: {missing_block}
+
+Detected cross-variable issues (from whatever site data is known so far):
 {issues_block}
 
 Linked variables:
 {links_block}
 
-Structured intervention evidence (numbers/sources to use):
+Structured intervention evidence (numbers/sources to use, if any matched):
 {structured_block}
 
 Supporting scientific reasoning passages:
